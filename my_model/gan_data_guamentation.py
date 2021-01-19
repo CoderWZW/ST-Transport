@@ -1,9 +1,65 @@
+import numpy as np
+import random
+from torch.utils.data import Dataset, DataLoader
 import utils, torch, time, os, pickle
 import numpy as np
 import torch.nn as nn
 import torch.optim as optim
 from torch.autograd import grad
-from dataloader import dataloader
+
+class Loader(Dataset):
+    def __init__(self):
+        self.seq_len = 4
+
+        # (16992, 307, 3)
+        self.data = np.load("processed_pems04.npz")['data']
+        # self.data = self.data[:288][:,:,0]
+        self.data = self.data[:,:,0]
+        # print(self.data)
+        # print(self.data.size)
+        # (307, 16992)
+        # 做个归一化
+        max_value = np.max(self.data)
+        min_value = np.min(self.data)
+        _range = max_value-min_value
+        self.data = (self.data - min_value) / _range
+        print(max_value, min_value, _range)
+        print(self.data)
+        print(self.data.shape)
+
+        # print(self.data[0].shape)
+        # print(self.data[:,0].shape)
+
+        # print(self.data[:,0:self.seq_len])
+        # print(self.data[:,0:self.seq_len].shape)
+        # self.seq_len = args.seq_len
+
+
+    def __getitem__(self, index):
+        # sample为(307, )
+        # sample = []
+        # for i in range(self.seq_len):
+        #     temp = np.array(self.data[:, i+index])
+        #     sample.append(temp)
+        # sample = np.array(sample).T[np.newaxis,:,:]
+        # return np.array(sample).astype(float)
+
+        # sample为( , 307)
+        sample = []
+        for i in range(self.seq_len):
+            temp = np.array(self.data[i+index])
+            sample.append(temp)
+        sample = np.array(sample)[np.newaxis,:,:]
+        return np.array(sample).astype(float)
+
+
+    def __len__(self):
+        # sample为(307, )
+        # return (len(self.data[0]) - self.seq_len)
+        # sample为( , 307)
+        return (len(self.data) - self.seq_len)
+
+
 
 class generator(nn.Module):
     # Network Architecture is exactly same as in infoGAN (https://arxiv.org/abs/1606.03657)
@@ -16,26 +72,36 @@ class generator(nn.Module):
 
         self.fc = nn.Sequential(
             nn.Linear(self.input_dim, 1024),
-            nn.BatchNorm1d(1024),
+            #nn.BatchNorm1d(1024),
             nn.ReLU(),
-            nn.Linear(1024, 128 * (self.input_size // 4) * (self.input_size // 4)),
-            nn.BatchNorm1d(128 * (self.input_size // 4) * (self.input_size // 4)),
-            nn.ReLU(),
+            nn.Linear(1024, 128 * self.input_size[0] * self.input_size[1]),
+            #nn.BatchNorm1d(128 * (self.input_size[0] // 4) * (self.input_size[1] // 4)),
+            #nn.ReLU(),
         )
         self.deconv = nn.Sequential(
-            nn.ConvTranspose2d(128, 64, 4, 2, 1),
+            nn.ConvTranspose2d(128, 64, 3, 1, 1),
             nn.BatchNorm2d(64),
             nn.ReLU(),
-            nn.ConvTranspose2d(64, self.output_dim, 4, 2, 1),
+            nn.ConvTranspose2d(64, self.output_dim, 3, 1, 1),
             nn.Tanh(),
         )
         utils.initialize_weights(self)
 
     def forward(self, input):
+        # [1, 64]
+        # [1, 471552]
+        # [1, 128, 307, 12]
+        # [1, 1, 307, 12]
         x = self.fc(input)
-        x = x.view(-1, 128, (self.input_size // 4), (self.input_size // 4))
+        x = x.view(-1, 128, self.input_size[0], self.input_size[1])
+        # print(x.shape)
         x = self.deconv(x)
-
+        # print(x.shape)
+        # print('*'*80)
+        # torch.Size([64, 64])
+        # torch.Size([64, 6272])  128*7*7
+        # torch.Size([64, 128, 7, 7])
+        # torch.Size([64, 3, 28, 28])
         return x
 
 class discriminator(nn.Module):
@@ -48,15 +114,15 @@ class discriminator(nn.Module):
         self.input_size = input_size
 
         self.conv = nn.Sequential(
-            nn.Conv2d(self.input_dim, 64, 4, 2, 1),
+            nn.Conv2d(self.input_dim, 64, 3, 1, 1),
             nn.LeakyReLU(0.2),
-            nn.Conv2d(64, 128, 4, 2, 1),
+            nn.Conv2d(64, 128, 3, 1, 1),
             nn.BatchNorm2d(128),
             nn.LeakyReLU(0.2),
         )
         self.fc = nn.Sequential(
-            nn.Linear(128 * (self.input_size // 4) * (self.input_size // 4), 1024),
-            nn.BatchNorm1d(1024),
+            nn.Linear(128 * (self.input_size[0]) * (self.input_size[1]), 1024),
+            #nn.BatchNorm1d(1024),
             nn.LeakyReLU(0.2),
             nn.Linear(1024, self.output_dim),
             # nn.Sigmoid(),
@@ -64,44 +130,70 @@ class discriminator(nn.Module):
         utils.initialize_weights(self)
 
     def forward(self, input):
+        # [1, 1, 307, 12]
+        # [1, 128, 307, 12]
+        # [1, 471552]
+        # [1, 1]
         x = self.conv(input)
-        x = x.view(-1, 128 * (self.input_size // 4) * (self.input_size // 4))
+        x = x.view(-1, 128 * self.input_size[0] * self.input_size[1])
         x = self.fc(x)
-
+        # torch.Size([64, 3, 28, 28])
+        # torch.Size([64, 128, 7, 7])
+        # torch.Size([64, 6272])
+        # torch.Size([64, 1])
         return x
 
 class WGAN_GP(object):
-    def __init__(self, args):
+    def __init__(self):
         # parameters
-        self.epoch = args.epoch
+        # self.epoch = args.epoch
+        # self.sample_num = 100
+        # self.batch_size = args.batch_size
+        # self.save_dir = args.save_dir
+        # self.result_dir = args.result_dir
+        # self.dataset = args.dataset
+        # self.log_dir = args.log_dir
+        # self.gpu_mode = args.gpu_mode
+        # self.model_name = args.gan_type
+        # self.input_size = args.input_size
+        # self.z_dim = 62
+        # self.lambda_ = 10
+        # self.n_critic = 5               # the number of iterations of the critic per generator iteration
+        self.epoch = 4
         self.sample_num = 100
-        self.batch_size = args.batch_size
-        self.save_dir = args.save_dir
-        self.result_dir = args.result_dir
-        self.dataset = args.dataset
-        self.log_dir = args.log_dir
-        self.gpu_mode = args.gpu_mode
-        self.model_name = args.gan_type
-        self.input_size = args.input_size
-        self.z_dim = 62
-        self.lambda_ = 10
+        self.batch_size = 4
+        self.save_dir = 'models'
+        self.result_dir = 'results'
+        self.dataset = 'pems'
+        self.log_dir ='logs'
+        self.gpu_mode = True
+        self.model_name = "WGAN_gp"
+        # self.input_size = args.input_size
+        self.z_dim = 8
+        self.lambda_ = 1
         self.n_critic = 5               # the number of iterations of the critic per generator iteration
 
         # load dataset
-        self.data_loader = dataloader(self.dataset, self.input_size, self.batch_size)
-        data = self.data_loader.__iter__().__next__()[0]
+        # self.data_loader = dataloader(self.dataset, self.input_size, self.batch_size)
+        # data = self.data_loader.__iter__().__next__()[0]
+        dataset = Loader()
+        self.data_loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=True)
+        data = self.data_loader.__iter__().__next__()
 
+        print("dataset_length:", self.data_loader.dataset.__len__())
         print('*'*80)
-        print(data.type)
+        # (307,4)
         print(data.shape)
         print('*'*80)
+
+        self.input_size = [data.shape[2],data.shape[3]]
 
 
         # networks init
         self.G = generator(input_dim=self.z_dim, output_dim=data.shape[1], input_size=self.input_size)
         self.D = discriminator(input_dim=data.shape[1], output_dim=1, input_size=self.input_size)
-        self.G_optimizer = optim.Adam(self.G.parameters(), lr=args.lrG, betas=(args.beta1, args.beta2))
-        self.D_optimizer = optim.Adam(self.D.parameters(), lr=args.lrD, betas=(args.beta1, args.beta2))
+        self.G_optimizer = optim.Adam(self.G.parameters(), lr=0.0002, betas=(0.5, 0.999))
+        self.D_optimizer = optim.Adam(self.D.parameters(), lr=0.0002, betas=(0.5, 0.999))
 
         if self.gpu_mode:
             self.G.cuda()
@@ -134,7 +226,9 @@ class WGAN_GP(object):
         for epoch in range(self.epoch):
             self.G.train()
             epoch_start_time = time.time()
-            for iter, (x_, _) in enumerate(self.data_loader):
+            # for iter, (x_, _) in enumerate(self.data_loader):
+            for iter, x_ in enumerate(self.data_loader):
+                x_ = x_.type(torch.FloatTensor)
                 if iter == self.data_loader.dataset.__len__() // self.batch_size:
                     break
 
@@ -145,10 +239,12 @@ class WGAN_GP(object):
                 # update D network
                 self.D_optimizer.zero_grad()
 
+                #print(x_.shape)
                 D_real = self.D(x_)
                 D_real_loss = -torch.mean(D_real)
 
                 G_ = self.G(z_)
+                #print("G_",G_.shape)
                 D_fake = self.D(G_)
                 D_fake_loss = torch.mean(D_fake)
 
@@ -203,11 +299,11 @@ class WGAN_GP(object):
         print("Training finish!... save training results")
 
         self.save()
-        utils.generate_animation(self.result_dir + '/' + self.dataset + '/' + self.model_name + '/' + self.model_name,
-                                 self.epoch)
+        # utils.generate_animation(self.result_dir + '/' + self.dataset + '/' + self.model_name + '/' + self.model_name,
+        #                          self.epoch)
         utils.loss_plot(self.train_hist, os.path.join(self.save_dir, self.dataset, self.model_name), self.model_name)
 
-    def visualize_results(self, epoch, fix=True):
+    def visualize_results(self, epoch, fix=False):
         self.G.eval()
 
         if not os.path.exists(self.result_dir + '/' + self.dataset + '/' + self.model_name):
@@ -227,14 +323,17 @@ class WGAN_GP(object):
 
             samples = self.G(sample_z_)
 
+
         if self.gpu_mode:
             samples = samples.cpu().data.numpy().transpose(0, 2, 3, 1)
         else:
             samples = samples.data.numpy().transpose(0, 2, 3, 1)
 
-        samples = (samples + 1) / 2
-        utils.save_images(samples[:image_frame_dim * image_frame_dim, :, :, :], [image_frame_dim, image_frame_dim],
-                          self.result_dir + '/' + self.dataset + '/' + self.model_name + '/' + self.model_name + '_epoch%03d' % epoch + '.png')
+        # print(samples)
+        # print(samples.shape)
+        # samples = (samples + 1) / 2
+        # utils.save_images(samples[:image_frame_dim * image_frame_dim, :, :, :], [image_frame_dim, image_frame_dim],
+        #                   self.result_dir + '/' + self.dataset + '/' + self.model_name + '/' + self.model_name + '_epoch%03d' % epoch + '.png')
 
     def save(self):
         save_dir = os.path.join(self.save_dir, self.dataset, self.model_name)
@@ -253,3 +352,19 @@ class WGAN_GP(object):
 
         self.G.load_state_dict(torch.load(os.path.join(save_dir, self.model_name + '_G.pkl')))
         self.D.load_state_dict(torch.load(os.path.join(save_dir, self.model_name + '_D.pkl')))
+
+        sample_z_ = torch.rand((self.batch_size, self.z_dim))
+        if self.gpu_mode:
+            sample_z_ = sample_z_.cuda()
+
+        samples = self.G(sample_z_)
+        samples = samples.cpu()
+        output = samples.detach().numpy()
+        print(output)
+        print(output.shape)
+
+if  __name__ == "__main__":
+    GAN = WGAN_GP()
+    GAN.train()
+    #GAN.load()
+
